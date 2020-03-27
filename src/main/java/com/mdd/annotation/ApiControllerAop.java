@@ -57,8 +57,17 @@ public class ApiControllerAop {
 
     private void validParamsByAnnotation(ProceedingJoinPoint pjp, ReqAop reqAop, List<String> validList, String key) throws Exception {
         Object[] arguments = pjp.getArgs();
+        if (!Objects.isNull(arguments)) {
+            throw new RuntimeException("请求body不能为空");
+        }
         // 解密请求参数
-        String decryValue = AESCodeUtil.decryptAES((String) arguments[0], key);
+        String decryValue;
+        try {
+            decryValue = AESCodeUtil.decryptAES((String) arguments[0], key);
+        } catch (Exception e) {
+            log.error("===>参数解密异常：{}", e);
+            throw new RuntimeException("参数解密异常");
+        }
 
         //存放解密参数信息
         Map<String, Object> paramMap = JSON.parseObject(decryValue);
