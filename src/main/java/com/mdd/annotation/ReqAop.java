@@ -28,7 +28,7 @@ public @interface ReqAop {
     boolean valiedArgs() default false;
 
     /**
-     * 当需要获取账号时获取账号的类型是什么
+     * 需要获校验的类
      * @return
      */
     Class<? extends BaseDto> clazz() default BaseDto.class;
