@@ -1,5 +1,6 @@
 package com.mdd.dto;
 
+import com.mdd.annotation.FormatLimit;
 import lombok.Data;
 
 import javax.validation.constraints.NotBlank;
@@ -51,4 +52,7 @@ public class CustomerInfoDto extends BaseDto{
    * 备注
    */
   private String baRemark;
+
+  @FormatLimit(forages = {"0", "1"}, message = "status不符合约定")
+  private Integer status;
 }
