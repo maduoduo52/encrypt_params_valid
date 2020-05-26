@@ -1,26 +1,30 @@
 package com.mdd.annotation;
 
+import cn.hutool.http.HttpStatus;
+import cn.hutool.json.JSONArray;
+import cn.hutool.json.JSONObject;
+import cn.hutool.json.JSONTokener;
 import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.JSONArray;
+import com.mdd.enums.ExceptionEnum;
 import com.mdd.util.AESCodeUtil;
+import com.mdd.util.Result;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.reflect.FieldUtils;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
-import org.hibernate.validator.constraints.NotBlank;
+import org.hibernate.validator.constraints.Length;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
-import javax.validation.constraints.NotNull;
+import javax.validation.constraints.*;
 import java.lang.reflect.Field;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.math.BigDecimal;
+import java.util.*;
 
 /**
  * @author Maduo
@@ -37,44 +41,85 @@ public class ApiControllerAop {
         log.info("====>>>ReqAop aop 开始启动 ");
 
         List<String> validList = new ArrayList<>();
+        String key = "wmsapi0123456789";
+
+        String reqData;
+        Object rvt;
         if (reqAop.valiedArgs()) {
-            String key = "wmsapi0123456789";
 
-            validParamsByAnnotation(pjp, reqAop, validList, key);
+            long start = System.currentTimeMillis();
+            reqData =  validParamsByAnnotation(pjp, reqAop, validList, key);
+            log.warn("===>参数校验耗时：{}ms，校验结果：{}, 解密结果：{}", System.currentTimeMillis() - start, JSON.toJSONString(validList), reqData);
+            if (!CollectionUtils.isEmpty(validList)) {
+                //参数校验不通过将错误信息存入日志
+                return Result.validationError(ExceptionEnum.PARAMS_VALIED_ERROR.getCode(), validList);
+            }
+
+            if (StringUtils.isEmpty(reqData)) {
+                return Result.validationError(ExceptionEnum.REQUEST_BODY_NOT_NULL.getMessage());
+            }
+
+            //设置请求体为解密之后的json串
+            Object[] params = {reqData};
+            rvt = pjp.proceed(params);
+        }else {
+            rvt = pjp.proceed();
         }
 
-        if (!CollectionUtils.isEmpty(validList)) {
-            //参数校验不通过将错误信息存入日志
-
-            throw new RuntimeException(JSON.toJSONString(validList));
+        if (!(rvt instanceof Result)) {
+            log.error(ExceptionEnum.RES_MUST_RESULT.getMessage());
+            throw new RuntimeException(ExceptionEnum.RES_MUST_RESULT.getMessage());
         }
-        Object rvt = pjp.proceed();
-
-        return rvt;
+        Result result = (Result) rvt;
+        if (reqAop.aes()) {
+            if (result.getCode() == HttpStatus.HTTP_OK && !Objects.isNull(result.getData())) {
+                // 返回参数加密
+                result.setData(AESCodeUtil.encode(JSON.toJSONString(result.getData()), key));
+            }
+        }
+        return result;
     }
 
-
-
-    private void validParamsByAnnotation(ProceedingJoinPoint pjp, ReqAop reqAop, List<String> validList, String key) throws Exception {
+    private String validParamsByAnnotation(ProceedingJoinPoint pjp, ReqAop reqAop, List<String> validList, String key) {
         Object[] arguments = pjp.getArgs();
-        if (!Objects.isNull(arguments)) {
-            throw new RuntimeException("请求body不能为空");
+        if (Objects.isNull(arguments)) {
+            throw new RuntimeException(ExceptionEnum.REQUEST_BODY_NOT_NULL.getMessage());
         }
         // 解密请求参数
         String decryValue;
+
         try {
-            decryValue = AESCodeUtil.decryptAES((String) arguments[0], key);
+            decryValue = AESCodeUtil.decode((String) arguments[0], key);
         } catch (Exception e) {
-            log.error("===>参数解密异常：{}", e);
-            throw new RuntimeException("参数解密异常");
+            log.error("===> 请求参数解密异常：{}", e);
+            throw new RuntimeException(ExceptionEnum.PARAMS_DECODE_ERROR.getMessage());
         }
 
-        //存放解密参数信息
-        Map<String, Object> paramMap = JSON.parseObject(decryValue);
+        if (decryValue == null) {
+            throw new RuntimeException(ExceptionEnum.PARAMS_DECODE_ERROR.getMessage());
+        }
+        Object object = new JSONTokener(decryValue).nextValue();
+
         //获取需要校验的类信息
         Class claz = reqAop.clazz();
+        if(object instanceof JSONObject){
+            //存放解密参数信息
+            Map<String, Object> paramMap = JSON.parseObject(decryValue);
 
-        validField(paramMap, validList, claz);
+            validField(paramMap, validList, claz);
+        }else if (object instanceof JSONArray) {
+            com.alibaba.fastjson.JSONArray jsonArray = JSON.parseArray(decryValue);
+
+            for (Object o : jsonArray) {
+                Map<String, Object> listParamMap = JSON.parseObject(JSON.toJSONString(o));
+                validField(listParamMap, validList, claz);
+            }
+
+        }else {
+            throw new RuntimeException();
+        }
+
+        return decryValue;
     }
 
     private void validField(Map<String, Object> paramMap, List<String> validList, Class clazz) {
@@ -88,34 +133,102 @@ public class ApiControllerAop {
                     ParameterizedType pt = (ParameterizedType) t;
                     //得到对象list中实例的类型
                     Class clz = (Class) pt.getActualTypeArguments()[0];
-                    Object o = paramMap.get(field.getName());
-                    if (o instanceof JSONArray) {
-                        for (Object o1 : ((JSONArray)o)) {
-                            //获取list对象的属性
-                            Map<String, Object> listParamMap = JSON.parseObject(JSON.toJSONString(o1));
-                            if (!listParamMap.isEmpty()) {
-                                //递归校验List参数信息
-                                validField(listParamMap, validList, clz);
+                    Object o = null;
+                    if (paramMap != null) {
+                        o = paramMap.get(field.getName());
+                    }
+                    if (o != null) {
+                        Object object = new JSONTokener(o.toString()).nextValue();
+                        if (object instanceof cn.hutool.json.JSONArray) {
+                            com.alibaba.fastjson.JSONArray jsonArray = JSON.parseArray(JSON.toJSONString(object));
+                            for (Object o1 : jsonArray) {
+                                //获取list对象的属性
+                                Map<String, Object> listParamMap = JSON.parseObject(JSON.toJSONString(o1));
+                                if (!listParamMap.isEmpty()) {
+                                    //递归校验List参数信息
+                                    validField(listParamMap, validList, clz);
+                                }
                             }
                         }
                     }
                 }
             }
             //获取参数值
-            Object o = paramMap.get(field.getName());
+            Object o = null;
+            if (paramMap != null) {
+                o = paramMap.get(field.getName());
+            }
             //获取NotBlank注解
             NotBlank blank = field.getAnnotation(NotBlank.class);
             if (blank != null) {
-                if (Objects.isNull(o)) {
-                    validList.add(clazz.getSimpleName() + "." + blank.message());
-                }
+                valideNull(validList, o, blank.message());
             }
             //获取NotNull注解
             NotNull notNull = field.getAnnotation(NotNull.class);
             if (notNull != null) {
-                if (Objects.isNull(o)) {
-                    validList.add(clazz.getSimpleName() + "." + notNull.message());
+                valideNull(validList, o, notNull.message());
+            }
+            Length length = field.getAnnotation(Length.class);
+            if (length != null) {
+                String val = o + "";
+                if (val.length() > length.max()) {
+                    validList.add(length.message());
                 }
+            }
+            Pattern pattern = field.getAnnotation(Pattern.class);
+            if (pattern != null) {
+                if (StringUtils.isNotBlank(pattern.regexp()) && !Objects.isNull(o)) {
+                    boolean flag = java.util.regex.Pattern.matches(pattern.regexp(), o.toString());
+                    if (!flag) {
+                        validList.add(pattern.message());
+                    }
+                }
+            }
+            FormatLimit formatLimit = field.getAnnotation(FormatLimit.class);
+            if (formatLimit != null && !Objects.isNull(o) && StringUtils.isNotBlank(o.toString())) {
+                String[] formates = formatLimit.forages();
+                boolean contains = Arrays.asList(formates).contains(o.toString());
+                if (!contains) {
+                    validList.add(formatLimit.message());
+                }
+            }
+            Min min = field.getAnnotation(Min.class);
+            if (min != null && !Objects.isNull(o)) {
+                if (o instanceof Integer) {
+                    int val = Integer.parseInt(o + "");
+                    if (val < min.value()) {
+                        validList.add(min.message());
+                    }
+                }
+            }
+            DecimalMin decimalMin = field.getAnnotation(DecimalMin.class);
+            if (decimalMin != null && !Objects.isNull(o)) {
+                BigDecimal o1 ;
+                if (o instanceof BigDecimal) {
+                    o1 = (BigDecimal) o;
+                    BigDecimal m = new BigDecimal(decimalMin.value());
+                    if (o1.compareTo(m) < 0) {
+                        validList.add(decimalMin.message());
+                    }
+                }else if (o instanceof Integer) {
+                    o1 = new BigDecimal((Integer) o);
+                    BigDecimal m = new BigDecimal(decimalMin.value());
+                    if (o1.compareTo(m) < 0) {
+                        validList.add(decimalMin.message());
+                    }
+                }
+            }
+        }
+    }
+
+    private void valideNull(List<String> validList, Object o, String message) {
+        if (o instanceof String) {
+            if (StringUtils.isBlank((String) o)) {
+                validList.add(message);
+            }
+        } else {
+            if (Objects.isNull(o)) {
+                validList.add(message);
             }
         }
     }
