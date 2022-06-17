@@ -16,7 +16,7 @@
 
     <properties>
         <java.version>1.8</java.version>
-        <fastjson.version>1.2.42</fastjson.version>
+        <fastjson.version>1.2.83</fastjson.version>
         <commons-lang3.version>3.9</commons-lang3.version>
         <javassist.version>3.12.1.GA</javassist.version>
         <aop.version>2.1.9.RELEASE</aop.version>
